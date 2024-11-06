@@ -9,6 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <unistd.h> // Pour execvp et fork
+#include <sys/wait.h> // Pour waitpid et wait
+#include <fcntl.h> //Pour la manipulation de mes fichiers au niveau de la question 6
+
 #include "variante.h"
 #include "readcmd.h"
 
@@ -22,6 +26,105 @@
  * lines in CMakeLists.txt.
  */
 
+// ========================================================================================
+// QUESTION 1 : Lancement d'une commande
+// QUESTION 2 : Lancement tache de fond ( Attente de terminaison)
+// QUESTION 3 : Lancement tache de fond 
+// QUESTION 4 : Lister les processus en tâches de fond
+// QUESTION 5 : Pipe
+
+#define MAX_JOBS 100
+
+typedef struct {
+    pid_t pid;
+    char *command;
+} Job;
+
+
+Job jobs[MAX_JOBS];
+int job_count = 0;
+
+
+// Ajoute un nouveau processus en tâche de fond à la liste des jobs.
+void ajouter_job(pid_t pid, char *command) {
+    if (job_count < MAX_JOBS) {
+        jobs[job_count].pid = pid;
+        jobs[job_count].command = strdup(command);  // Allouer une nouvelle chaîne pour la commande
+        job_count++;
+    } else {
+        printf("Erreur : trop de tâches en arrière-plan.\n");
+    }
+}
+
+// Parcourt tous les processus en tâche de fond et retire de la liste des jobs et sa mémoire est libérée si un processus est terminé (result != 0),
+void verifier_jobs() {
+    for (int i = 0; i < job_count; i++) {
+        int status;
+        pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
+        if (result != 0) {
+            // Le processus est terminé, on le retire de la liste
+            printf("Processus %d terminé.\n", jobs[i].pid);
+            free(jobs[i].command);
+            // Retirer le job en décalant les éléments
+            for (int j = i; j < job_count - 1; j++) {
+                jobs[j] = jobs[j + 1];
+            }
+            job_count--;
+            i--;  // On vérifie le même indice à nouveau car la liste a été décalée
+        }
+    }
+}
+
+
+// Affiche la liste des processus en tâche de fond.
+void lister_jobs() {
+    printf("Liste des processus en tâche de fond :\n");
+    for (int i = 0; i < job_count; i++) {
+        printf("PID: %d, Commande: %s\n", jobs[i].pid, jobs[i].command);
+    }
+}
+
+// Exécute la commande fournie dans le shell
+void executer_command(struct cmdline *l) {
+    if (l == NULL || l->seq == NULL || l->seq[0] == NULL) {
+        return;  // Pas de commande à exécuter
+    }
+
+	char **cmd = l->seq[0]; // Première commande dans la séquence
+    pid_t pid = fork();
+
+    if (pid == -1) {
+        // Erreur lors du fork
+        perror("fork");
+        exit(EXIT_FAILURE);
+
+    } 
+	
+	if (pid == 0) {
+        // Processus enfant : exécuter la commande
+
+        execvp(cmd[0], cmd);
+        // Si execvp échoue
+        perror("execvp");
+        exit(EXIT_FAILURE);
+
+    } else {
+        // Processus père : attendre si nécessaire
+        if (l->bg) { 
+			ajouter_job(pid, cmd[0]);
+			printf("[Processus en tâche de fond lancé: PID %d]\n", pid);
+            
+        } else {
+			// Si la commande est en avant-plan, on attend sa fin
+			waitpid(pid, NULL, 0);
+        }
+    }
+}
+
+
+
+// ========================================================================================
+
 #if USE_GUILE == 1
 #include <libguile.h>
 
@@ -32,7 +135,21 @@ int question6_executer(char *line)
 	 * parsecmd, then fork+execvp, for a single command.
 	 * pipe and i/o redirection are not required.
 	 */
-	printf("Not implemented yet: can not execute %s\n", line);
+
+	// Parse la ligne de commande
+    struct cmdline *cmd = parsecmd(&line);
+    if (cmd == NULL || cmd->seq[0] == NULL) {
+        free(line);
+        return -1; // Rien à exécuter
+    }
+
+    // Créer un processus fils
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+        free(line);
+        return -1;
+    }
 
 	/* Remove this line when using parsecmd as it will free it */
 	free(line);
@@ -74,6 +191,9 @@ int main() {
 		int i, j;
 		char *prompt = "ensishell>";
 
+		//************** Vérifier les processus en tâche de fond **************
+        verifier_jobs();
+
 		/* Readline use some internal memory structure that
 		   can not be cleaned at the end of the program. Thus
 		   one memory leak per command seems unavoidable yet */
@@ -81,6 +201,13 @@ int main() {
 		if (line == 0 || ! strncmp(line,"exit", 4)) {
 			terminate(line);
 		}
+
+		//*********** Vérifier si la commande est 'jobs' ***************
+        if (strcmp(line, "jobs") == 0) {
+            lister_jobs();  // Appeler la fonction qui liste les jobs
+            free(line);
+            continue;  // Retourner au prompt
+        }
 
 #if USE_GNU_READLINE == 1
 		add_history(line);
@@ -128,6 +255,12 @@ int main() {
                         }
 			printf("\n");
 		}
+
+		//============================================================================================
+		// Execution de la commande 
+		executer_command(l);
 	}
+
+	return 0;
 
 }
