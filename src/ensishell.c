@@ -84,39 +84,104 @@ void lister_jobs() {
     }
 }
 
+// =======================================================================================================
+void executer_command_pipe(struct cmdline *l) {
+    if (l == NULL || l->seq == NULL || l->seq[0] == NULL || l->seq[1] == NULL) {
+        return;  // Pas de commande à exécuter
+    }
+
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
+        exit(EXIT_FAILURE);
+    }
+
+    pid_t pid1 = fork();
+    if (pid1 == -1) {
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+
+    if (pid1 == 0) {
+        // Premier processus enfant : exécuter la première commande
+        close(pipefd[0]); // Ferme le côté lecture du pipe
+        dup2(pipefd[1], STDOUT_FILENO); // Redirige la sortie standard vers le pipe
+        close(pipefd[1]); // Ferme le côté écriture du pipe (duplication terminée)
+
+        char **cmd1 = l->seq[0];
+        execvp(cmd1[0], cmd1);
+        perror("execvp");
+        exit(EXIT_FAILURE);
+    }
+
+    pid_t pid2 = fork();
+    if (pid2 == -1) {
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+
+    if (pid2 == 0) {
+        // Deuxième processus enfant : exécuter la deuxième commande
+        close(pipefd[1]); // Ferme le côté écriture du pipe
+        dup2(pipefd[0], STDIN_FILENO); // Redirige l'entrée standard vers le pipe
+        close(pipefd[0]); // Ferme le côté lecture du pipe (duplication terminée)
+
+        char **cmd2 = l->seq[1];
+        execvp(cmd2[0], cmd2);
+        perror("execvp");
+        exit(EXIT_FAILURE);
+    }
+
+    // Processus parent
+    close(pipefd[0]); // Fermer les deux côtés du pipe dans le parent
+    close(pipefd[1]);
+
+    // Attendre les deux processus enfants
+    waitpid(pid1, NULL, 0);
+    waitpid(pid2, NULL, 0);
+}
+
+
 // Exécute la commande fournie dans le shell
 void executer_command(struct cmdline *l) {
     if (l == NULL || l->seq == NULL || l->seq[0] == NULL) {
         return;  // Pas de commande à exécuter
     }
 
-	char **cmd = l->seq[0]; // Première commande dans la séquence
-    pid_t pid = fork();
+    // Vérifier si c'est une commande avec pipe
+    if (l->seq[1] != NULL) {
+        executer_command_pipe(l);
+    } else{
 
-    if (pid == -1) {
-        // Erreur lors du fork
-        perror("fork");
-        exit(EXIT_FAILURE);
+        // Commande simple
+        char **cmd = l->seq[0]; // Première commande dans la séquence
+        pid_t pid = fork();
 
-    } 
-	
-	if (pid == 0) {
-        // Processus enfant : exécuter la commande
+        if (pid == -1) {
+            // Erreur lors du fork
+            perror("fork");
+            exit(EXIT_FAILURE);
 
-        execvp(cmd[0], cmd);
-        // Si execvp échoue
-        perror("execvp");
-        exit(EXIT_FAILURE);
+        } 
+        
+        if (pid == 0) {
+            // Processus enfant : exécuter la commande
 
-    } else {
-        // Processus père : attendre si nécessaire
-        if (l->bg) { 
-			ajouter_job(pid, cmd[0]);
-			printf("[Processus en tâche de fond lancé: PID %d]\n", pid);
-            
+            execvp(cmd[0], cmd);
+            // Si execvp échoue
+            perror("execvp");
+            exit(EXIT_FAILURE);
+
         } else {
-			// Si la commande est en avant-plan, on attend sa fin
-			waitpid(pid, NULL, 0);
+            // Processus père : attendre si nécessaire
+            if (l->bg) { 
+                ajouter_job(pid, cmd[0]);
+                printf("[Processus en tâche de fond lancé: PID %d]\n", pid);
+                
+            } else {
+                // Si la commande est en avant-plan, on attend sa fin
+                waitpid(pid, NULL, 0);
+            }
         }
     }
 }
