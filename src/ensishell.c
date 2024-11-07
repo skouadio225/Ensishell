@@ -56,21 +56,22 @@ void ajouter_job(pid_t pid, char *command) {
     }
 }
 
+
 // Parcourt tous les processus en tâche de fond et retire de la liste des jobs et sa mémoire est libérée si un processus est terminé (result != 0),
 void verifier_jobs() {
     for (int i = 0; i < job_count; i++) {
         int status;
         pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
-        if (result != 0) {
-            // Le processus est terminé, on le retire de la liste
+        if (result == -1) {
+            perror("waitpid error");
+        } else if (result > 0) {
             printf("Processus %d terminé.\n", jobs[i].pid);
             free(jobs[i].command);
-            // Retirer le job en décalant les éléments
             for (int j = i; j < job_count - 1; j++) {
                 jobs[j] = jobs[j + 1];
             }
             job_count--;
-            i--;  // On vérifie le même indice à nouveau car la liste a été décalée
+            i--;  // Vérifier à nouveau l'indice car la liste est décalée
         }
     }
 }
@@ -85,6 +86,9 @@ void lister_jobs() {
 }
 
 // =======================================================================================================
+
+// GESTION DES PIPES
+
 void executer_command_pipe(struct cmdline *l) {
     if (l == NULL || l->seq == NULL || l->seq[0] == NULL || l->seq[1] == NULL) {
         return;  // Pas de commande à exécuter
@@ -96,6 +100,7 @@ void executer_command_pipe(struct cmdline *l) {
         exit(EXIT_FAILURE);
     }
 
+    // Fork pour la première commande (écrivain)
     pid_t pid1 = fork();
     if (pid1 == -1) {
         perror("fork");
@@ -103,17 +108,18 @@ void executer_command_pipe(struct cmdline *l) {
     }
 
     if (pid1 == 0) {
-        // Premier processus enfant : exécuter la première commande
-        close(pipefd[0]); // Ferme le côté lecture du pipe
-        dup2(pipefd[1], STDOUT_FILENO); // Redirige la sortie standard vers le pipe
-        close(pipefd[1]); // Ferme le côté écriture du pipe (duplication terminée)
+        // Processus enfant pour la première commande
+        close(pipefd[0]); // Fermer le côté lecture du pipe
+        dup2(pipefd[1], STDOUT_FILENO); // Rediriger la sortie standard vers le pipe
+        close(pipefd[1]); // Fermer le descripteur du pipe après redirection
 
-        char **cmd1 = l->seq[0];
-        execvp(cmd1[0], cmd1);
+        execvp(l->seq[0][0], l->seq[0]);
+        // Si execvp échoue
         perror("execvp");
         exit(EXIT_FAILURE);
     }
 
+    // Fork pour la seconde commande (lecteur)
     pid_t pid2 = fork();
     if (pid2 == -1) {
         perror("fork");
@@ -121,68 +127,201 @@ void executer_command_pipe(struct cmdline *l) {
     }
 
     if (pid2 == 0) {
-        // Deuxième processus enfant : exécuter la deuxième commande
-        close(pipefd[1]); // Ferme le côté écriture du pipe
-        dup2(pipefd[0], STDIN_FILENO); // Redirige l'entrée standard vers le pipe
-        close(pipefd[0]); // Ferme le côté lecture du pipe (duplication terminée)
+        // Processus enfant pour la seconde commande
+        close(pipefd[1]); // Fermer le côté écriture du pipe
+        dup2(pipefd[0], STDIN_FILENO); // Rediriger l'entrée standard depuis le pipe
+        close(pipefd[0]); // Fermer le descripteur du pipe après redirection
 
-        char **cmd2 = l->seq[1];
-        execvp(cmd2[0], cmd2);
+        execvp(l->seq[1][0], l->seq[1]);
+        // Si execvp échoue
         perror("execvp");
         exit(EXIT_FAILURE);
     }
 
-    // Processus parent
-    close(pipefd[0]); // Fermer les deux côtés du pipe dans le parent
+    // Processus parent : fermer les deux descripteurs du pipe
+    close(pipefd[0]);
     close(pipefd[1]);
 
-    // Attendre les deux processus enfants
+    // Attendre la fin des deux processus enfants
     waitpid(pid1, NULL, 0);
     waitpid(pid2, NULL, 0);
 }
 
 
-// Exécute la commande fournie dans le shell
-void executer_command(struct cmdline *l) {
+
+//=======================================================================================
+
+// Redirection des fichiers
+
+void executer_command_redirection(struct cmdline *l) {
     if (l == NULL || l->seq == NULL || l->seq[0] == NULL) {
         return;  // Pas de commande à exécuter
     }
 
-    // Vérifier si c'est une commande avec pipe
-    if (l->seq[1] != NULL) {
-        executer_command_pipe(l);
-    } else{
+    char **cmd = l->seq[0];  // Première commande dans la séquence
+    pid_t pid = fork();
 
-        // Commande simple
-        char **cmd = l->seq[0]; // Première commande dans la séquence
-        pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
 
-        if (pid == -1) {
-            // Erreur lors du fork
-            perror("fork");
-            exit(EXIT_FAILURE);
+    if (pid == 0) {
+        // Processus enfant
 
-        } 
-        
-        if (pid == 0) {
-            // Processus enfant : exécuter la commande
+        // Redirection de l'entrée standard si nécessaire
+        if (l->in) {
+            int fd_in = open(l->in, O_RDONLY);
+            if (fd_in < 0) {
+                perror("open in");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd_in, STDIN_FILENO);
+            close(fd_in); // Fermer le descripteur après duplication
+        }
 
-            execvp(cmd[0], cmd);
-            // Si execvp échoue
-            perror("execvp");
-            exit(EXIT_FAILURE);
+        // Redirection de la sortie standard si nécessaire
+        if (l->out) {
+            int fd_out = open(l->out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd_out < 0) {
+                perror("open out");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd_out, STDOUT_FILENO);
+            close(fd_out); // Fermer le descripteur après duplication
+        }
 
+        // Exécuter la commande
+        execvp(cmd[0], cmd);
+        perror("execvp");
+        exit(EXIT_FAILURE);
+    } else {
+        // Processus parent : attendre la fin si la commande est en avant-plan
+        if (!l->bg) {
+            waitpid(pid, NULL, 0);
         } else {
-            // Processus père : attendre si nécessaire
-            if (l->bg) { 
-                ajouter_job(pid, cmd[0]);
-                printf("[Processus en tâche de fond lancé: PID %d]\n", pid);
-                
-            } else {
-                // Si la commande est en avant-plan, on attend sa fin
-                waitpid(pid, NULL, 0);
+            ajouter_job(pid, cmd[0]);
+            printf("[Processus en tâche de fond lancé: PID %d]\n", pid);
+        }
+    }
+}
+
+
+
+// Modifications dans executer_command pour appeler executer_command_redirection
+void executer_command(struct cmdline *l) {
+    if (l == NULL || l->seq == NULL || l->seq[0] == NULL) {
+        return;
+    }
+
+    int i = 0;
+    int pipefd[2] = {-1, -1}; // Initialisation du pipe à des valeurs non valides
+    int input_fd = -1;        // Le descripteur d'entrée initial est nul (-1)
+    pid_t pids[MAX_JOBS];
+    int num_pids = 0;
+
+    while (l->seq[i] != NULL) {
+        char **cmd = l->seq[i];
+        pid_t pid;
+
+        if (l->seq[i + 1] != NULL) {
+            // Créer un pipe si une autre commande suit
+            if (pipe(pipefd) == -1) {
+                perror("pipe");
+                exit(EXIT_FAILURE);
             }
         }
+
+        pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+
+        if (pid == 0) {
+            // Processus enfant : gestion des redirections et des pipes
+            if (input_fd != -1) {
+                // Rediriger l'entrée depuis le pipe précédent
+                if (dup2(input_fd, STDIN_FILENO) == -1) {
+                    perror("dup2 (input)");
+                    exit(EXIT_FAILURE);
+                }
+                close(input_fd);
+            }
+
+            if (l->seq[i + 1] != NULL) {
+                // Si une commande suit, rediriger la sortie vers le pipe
+                close(pipefd[0]); // Fermer le côté lecture du pipe
+                if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
+                    perror("dup2 (output)");
+                    exit(EXIT_FAILURE);
+                }
+                close(pipefd[1]);
+            }
+
+            // Gestion des redirections d'entrée et de sortie depuis/vers des fichiers
+            if (l->in != NULL && i == 0) {
+                // Redirection de l'entrée pour la première commande
+                int fd_in = open(l->in, O_RDONLY);
+                if (fd_in == -1) {
+                    perror("open (input file)");
+                    exit(EXIT_FAILURE);
+                }
+                if (dup2(fd_in, STDIN_FILENO) == -1) {
+                    perror("dup2 (input file)");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd_in);
+            }
+
+            if (l->out != NULL && l->seq[i + 1] == NULL) {
+                // Redirection de la sortie pour la dernière commande
+                int fd_out = open(l->out, O_WRONLY | O_CREAT, 0644);
+                if (fd_out == -1) {
+                    perror("open (output file)");
+                    exit(EXIT_FAILURE);
+                }
+                
+                // Troncature du fichier pour supprimer son contenu précédent
+                if (ftruncate(fd_out, 0) == -1) {
+                    perror("ftruncate");
+                    exit(EXIT_FAILURE);
+                }
+
+                if (dup2(fd_out, STDOUT_FILENO) == -1) {
+                    perror("dup2 (output file)");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd_out);
+            }
+
+            execvp(cmd[0], cmd);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        } else {
+            // Processus parent
+            pids[num_pids++] = pid;
+
+            // Fermer les descripteurs inutilisés
+            if (input_fd != -1) {
+                close(input_fd);
+            }
+            if (l->seq[i + 1] != NULL) {
+                close(pipefd[1]); // Fermer le côté écriture du pipe dans le parent
+                input_fd = pipefd[0]; // Garder le côté lecture du pipe pour la prochaine commande
+            }
+        }
+        i++;
+    }
+
+    // Attendre la fin de tous les processus enfants, sauf si en arrière-plan
+    if (!l->bg) {
+        for (int j = 0; j < num_pids; j++) {
+            waitpid(pids[j], NULL, 0);
+        }
+    } else {
+        ajouter_job(pids[num_pids - 1], l->seq[0][0]);
+        printf("[Processus en tâche de fond lancé: PID %d]\n", pids[num_pids - 1]);
     }
 }
 
